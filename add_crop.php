@@ -1,276 +1,233 @@
 <?php
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
-
+session_start();
 include 'config.php';
 
 $success_msg = '';
-$error_msg = '';
+$error_msg   = '';
 
-// ===== Handle Add/Update Farmer =====
-if(isset($_POST['save_farmer'])){
-    $farmer_id = intval($_POST['farmer_id']);
-    $name = $conn->real_escape_string($_POST['name']);
-    $phone = $conn->real_escape_string($_POST['phone']);
-    $location = $conn->real_escape_string($_POST['location']);
-
-    $check_farmer = $conn->query("SELECT id FROM farmers WHERE id=$farmer_id");
-    if($check_farmer->num_rows > 0){
-        $sql = "UPDATE farmers SET name='$name', phone='$phone', location='$location' WHERE id=$farmer_id";
-    } else {
-        $sql = "INSERT INTO farmers (id, name, phone, location) VALUES ($farmer_id,'$name','$phone','$location')";
-    }
-
-    if($conn->query($sql)){
-        $success_msg = "✅ Farmer saved successfully!";
-    } else {
-        $error_msg = "❌ Farmer Error: " . $conn->error;
-    }
-}
-
-// ===== Handle Add/Update Crop =====
-if(isset($_POST['save_crop'])){
-    $crop_id = intval($_POST['crop_id']);
-    $farmer_id = intval($_POST['farmer_id']);
-    $crop_name = $conn->real_escape_string($_POST['crop_name']);
-    $price = $conn->real_escape_string($_POST['price']);
-    $quantity = $conn->real_escape_string($_POST['quantity']);
-
-    $check_farmer = $conn->query("SELECT id FROM farmers WHERE id=$farmer_id");
-    if($check_farmer->num_rows == 0){
-        $error_msg = "❌ Selected Farmer does not exist!";
-    } else {
-        $image = null;
-        if(isset($_FILES['image']['name']) && !empty($_FILES['image']['name'])){
-            $image = $_FILES['image']['name'];
-            $target = "uploads/" . basename($image);
-            move_uploaded_file($_FILES['image']['tmp_name'], $target);
-        }
-
-        if($crop_id > 0){
-            $update_img_sql = $image ? ", image='$image'" : "";
-            $sql = "UPDATE crops SET farmer_id=$farmer_id, crop_name='$crop_name', price='$price', quantity='$quantity' $update_img_sql WHERE crop_id=$crop_id";
-        } else {
-            $sql = "INSERT INTO crops (farmer_id, crop_name, price, quantity, image) VALUES ($farmer_id,'$crop_name','$price','$quantity','$image')";
-        }
-
-        if($conn->query($sql)){
-            $success_msg = "✅ Crop saved successfully!";
-        } else {
-            $error_msg = "❌ Crop Error: " . $conn->error;
-        }
-    }
-}
-
-// ===== Fetch Farmers =====
+/* ===============================
+   FETCH FARMERS
+================================ */
 $farmer_list = [];
 $res = $conn->query("SELECT * FROM farmers ORDER BY id ASC");
-while($row = $res->fetch_assoc()) $farmer_list[] = $row;
+while($row = $res->fetch_assoc()){
+    $farmer_list[] = $row;
+}
 
-// ===== Fetch Crops =====
-$crops_list = [];
-$res2 = $conn->query("SELECT crops.*, farmers.name as farmer_name FROM crops JOIN farmers ON crops.farmer_id=farmers.id ORDER BY crop_id DESC");
-while($row = $res2->fetch_assoc()) $crops_list[] = $row;
+/* ===============================
+   ADD / UPDATE CROP (PASSWORD REQUIRED)
+================================ */
+if(isset($_POST['save_crop'])){
+    $farmer_id = intval($_POST['farmer_id']);
+    $crop_name = $conn->real_escape_string($_POST['crop_name']);
+    $price     = $conn->real_escape_string($_POST['price']);
+    $quantity_input = $_POST['quantity'];
+    $password  = $_POST['password'];
+
+    if(!is_numeric($quantity_input) || floatval($quantity_input) < 0){
+        $error_msg = "❌ Quantity must be a positive number!";
+    } else {
+
+        // 🔐 verify farmer first
+        $f = $conn->query("SELECT * FROM farmers WHERE id=$farmer_id");
+        if(!$f || $f->num_rows !== 1){
+            $error_msg = "❌ Farmer not found!";
+        } else {
+            $farmer = $f->fetch_assoc();
+
+            if(!password_verify($password, $farmer['password'])){
+                $error_msg = "❌ Wrong password!";
+            } else {
+
+                $quantity = floatval($quantity_input);
+                $image = null;
+
+                $check_sql = "SELECT * FROM crops 
+                              WHERE farmer_id=$farmer_id 
+                              AND crop_name='$crop_name'";
+                $check_res = $conn->query($check_sql);
+
+                if(!empty($_FILES['image']['name'])){
+                    $image = time().'_'.basename($_FILES['image']['name']);
+                    move_uploaded_file($_FILES['image']['tmp_name'], "uploads/".$image);
+                }
+
+                if($check_res && $check_res->num_rows > 0){
+                    // UPDATE
+                    $row = $check_res->fetch_assoc();
+                    $update_sql = "UPDATE crops 
+                                   SET price='$price', quantity='$quantity'";
+
+                    if($image){
+                        if($row['image'] && file_exists("uploads/".$row['image'])){
+                            unlink("uploads/".$row['image']);
+                        }
+                        $update_sql .= ", image='$image'";
+                    }
+
+                    $update_sql .= " WHERE crop_id=".$row['crop_id'];
+
+                    if($conn->query($update_sql)){
+                        $success_msg = "✅ Crop updated successfully!";
+                    } else {
+                        $error_msg = "❌ Update failed!";
+                    }
+
+                } else {
+                    // INSERT
+                    $sql = "INSERT INTO crops (farmer_id,crop_name,price,quantity,image)
+                            VALUES ($farmer_id,'$crop_name','$price','$quantity','$image')";
+                    if($conn->query($sql)){
+                        $success_msg = "✅ Crop added successfully!";
+                    } else {
+                        $error_msg = "❌ Insert failed!";
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ===============================
+   DELETE CROP (PASSWORD REQUIRED)
+================================ */
+if(isset($_POST['delete_crop'])){
+    $farmer_id = intval($_POST['del_farmer_id']);
+    $crop_name = $conn->real_escape_string($_POST['del_crop_name']);
+    $password  = $_POST['password'];
+
+    $f = $conn->query("SELECT * FROM farmers WHERE id=$farmer_id");
+    if($f && $f->num_rows === 1){
+        $farmer = $f->fetch_assoc();
+
+        if(password_verify($password, $farmer['password'])){
+            $c = $conn->query("SELECT * FROM crops 
+                               WHERE farmer_id=$farmer_id 
+                               AND crop_name='$crop_name'");
+
+            if($c && $c->num_rows === 1){
+                $crop = $c->fetch_assoc();
+
+                if($crop['image'] && file_exists("uploads/".$crop['image'])){
+                    unlink("uploads/".$crop['image']);
+                }
+
+                $conn->query("DELETE FROM crops WHERE crop_id=".$crop['crop_id']);
+                $success_msg = "🗑️ Crop deleted successfully!";
+            } else {
+                $error_msg = "❌ Crop not found!";
+            }
+        } else {
+            $error_msg = "❌ Wrong password!";
+        }
+    } else {
+        $error_msg = "❌ Farmer not found!";
+    }
+}
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Manage Farmers & Crops - Smart Agriculture</title>
-<link rel="stylesheet" href="css/styles.css">
-<style>
-body {
-    font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background:#f0f4f7;
-    margin:0;
-    color:#333;
-}
-header {
-    background:#2e7d32;
-    color:white;
-    padding:20px;
-    text-align:center;
-}
-header a {
-    color:white;
-    text-decoration:none;
-    background:#27ae60;
-    padding:8px 15px;
-    border-radius:5px;
-    display:inline-block;
-    margin-top:10px;
-}
-header a:hover { background:#1b5e20; }
-main {
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:30px;
-    padding:30px;
-    max-width:1100px;
-    margin:auto;
-}
-.card {
-    background:white;
-    padding:25px;
-    border-radius:12px;
-    box-shadow:0 6px 15px rgba(0,0,0,0.1);
-    transition:transform 0.2s ease;
-}
-.card:hover { transform:translateY(-3px); }
-h2 {
-    color:#2e7d32;
-    text-align:center;
-    margin-bottom:15px;
-}
-form { display:grid; gap:15px; }
-label { font-weight:bold; }
-input, select, button {
-    padding:12px;
-    border-radius:6px;
-    border:1px solid #ccc;
-    width:100%;
-}
-button {
-    background:#2e7d32;
-    color:white;
-    border:none;
-    cursor:pointer;
-    font-weight:bold;
-}
-button:hover { background:#1b5e20; }
-.message {
-    padding:10px;
-    border-radius:5px;
-    margin-top:10px;
-    text-align:center;
-}
-.success { background:#d4edda; color:#155724; }
-.error { background:#f8d7da; color:#721c24; }
-@media(max-width:900px){ main{grid-template-columns:1fr;} }
+<title>Crop Management</title>
 
-/* ✅ New styles for Existing Crops section */
-.existing-crops {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-    gap: 20px;
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Tahoma}
+body{background:linear-gradient(135deg,#fffde7,#e8f5e9);padding-top:100px}
+
+/* NAVBAR */
+nav{
+    position:fixed;top:0;left:0;width:100%;
+    background:linear-gradient(90deg,#1b5e20,#2e7d32);
+    color:#fff;padding:22px 40px;
+    display:flex;justify-content:space-between;align-items:center;
+    box-shadow:0 8px 25px rgba(0,0,0,0.25);
 }
-.crop-item {
-    background: #ffffff;
-    border-radius: 12px;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-    overflow: hidden;
-    transition: transform 0.3s, box-shadow 0.3s;
+nav div:first-child{font-size:26px;font-weight:700}
+nav a{
+    color:white;text-decoration:none;margin-left:22px;
+    font-size:18px;font-weight:600;padding:8px 14px;
+    border-radius:8px;transition:.3s
 }
-.crop-item:hover {
-    transform: translateY(-6px);
-    box-shadow: 0 8px 18px rgba(0,0,0,0.15);
+nav a:hover{background:rgba(255,255,255,.15)}
+
+@media(max-width:768px){
+    nav{flex-direction:column;gap:12px}
 }
-.crop-item img {
-    width: 100%;
-    height: 200px; /* ✅ bigger image */
-    object-fit: cover;
+
+.container{max-width:650px;margin:auto;display:grid;gap:30px}
+.card{
+    background:#fff;padding:30px;border-radius:20px;
+    box-shadow:0 15px 40px rgba(0,0,0,.2)
 }
-.crop-info {
-    padding: 15px;
+h2{text-align:center;color:#2e7d32;margin-bottom:15px}
+input,select,button{
+    width:100%;padding:12px;margin:10px 0;
+    border-radius:8px;border:1px solid #ccc
 }
-.crop-info h3 {
-    margin: 0;
-    font-size: 18px;
-    color: #27ae60;
-}
-.crop-info p {
-    margin: 6px 0;
-    font-size: 14px;
-    color: #555;
-}
+button{background:#2e7d32;color:#fff;border:none;font-size:16px}
+button.delete{background:#c62828}
+.success{background:#c8e6c9;padding:12px;border-radius:8px}
+.error{background:#ffcdd2;padding:12px;border-radius:8px}
 </style>
 </head>
+
 <body>
 
-<header>
-<h1>👨‍🌾 Manage Farmers & Crops</h1>
-<a href="marketplace.php">→ Go to Marketplace</a>
-</header>
+<nav>
+    <div>🌾 Farmer Portal</div>
+    <div>
+        <a href="index.php">Home</a>
+        <a href="login.php">Farmer Profile</a>
+        <a href="marketplace.php">Marketplace</a>
+    </div>
+</nav>
 
-<main>
-<!-- Add / Update Farmer -->
-<div class="card">
-<h2>Add / Update Farmer</h2>
-<?php if($success_msg) echo "<div class='message success'>$success_msg</div>"; ?>
-<?php if($error_msg) echo "<div class='message error'>$error_msg</div>"; ?>
-<form method="post">
-    <label>Farmer ID (Manual)</label>
-    <input type="number" name="farmer_id" required placeholder="Enter Farmer ID">
+<div class="container">
 
-    <label>Farmer Name</label>
-    <input type="text" name="name" required>
+<?php if($success_msg) echo "<div class='success'>$success_msg</div>"; ?>
+<?php if($error_msg) echo "<div class='error'>$error_msg</div>"; ?>
 
-    <label>Phone</label>
-    <input type="text" name="phone" required>
-
-    <label>Location</label>
-    <input type="text" name="location" required>
-
-    <button type="submit" name="save_farmer">Save Farmer</button>
-</form>
-</div>
-
-<!-- Add / Update Crop -->
+<!-- ADD / UPDATE -->
 <div class="card">
 <h2>Add / Update Crop</h2>
 <form method="post" enctype="multipart/form-data">
-    <label>Select Farmer</label>
-    <select name="farmer_id" required>
-        <option value="">-- Select Farmer --</option>
-        <?php foreach($farmer_list as $f){
-            echo "<option value='{$f['id']}'>{$f['name']} (ID: {$f['id']})</option>";
-        } ?>
-    </select>
+<select name="farmer_id" required>
+<option value="">Select Farmer</option>
+<?php foreach($farmer_list as $f){
+echo "<option value='{$f['id']}'>{$f['name']}</option>";
+} ?>
+</select>
 
-    <label>Crop Name</label>
-    <input type="text" name="crop_name" required>
+<input type="text" name="crop_name" placeholder="Crop Name" required>
+<input type="text" name="price" placeholder="Price" required>
+<input type="number" name="quantity" step="0.01" placeholder="Quantity" required>
 
-    <label>Price</label>
-    <input type="text" name="price" required>
+<input type="password" name="password" placeholder="Farmer Login Password" required>
 
-    <label>Quantity</label>
-    <input type="text" name="quantity" required>
-
-    <label>Image</label>
-    <input type="file" name="image">
-
-    <input type="hidden" name="crop_id" value="0">
-    <button type="submit" name="save_crop">Save Crop</button>
+<input type="file" name="image">
+<button name="save_crop">Save Crop</button>
 </form>
 </div>
 
-<!-- ✅ Existing Crops Section -->
-<div class="card" style="grid-column:1 / -1;">
-<h2>🌾 Existing Crops</h2>
-<div class="existing-crops">
-<?php
-if(count($crops_list) > 0){
-    foreach($crops_list as $c){
-        $img_path = $c['image'] && file_exists("uploads/".$c['image']) ? "uploads/".$c['image'] : "uploads/no_image.jpg";
-        echo "<div class='crop-item'>";
-        echo "<img src='{$img_path}' alt='{$c['crop_name']}'>";
-        echo "<div class='crop-info'>";
-        echo "<h3>{$c['crop_name']}</h3>";
-        echo "<p><strong>Farmer:</strong> {$c['farmer_name']}</p>";
-        echo "<p><strong>Price:</strong> ₹{$c['price']}</p>";
-        echo "<p><strong>Quantity:</strong> {$c['quantity']}</p>";
-        echo "</div>";
-        echo "</div>";
-    }
-} else {
-    echo "<p style='text-align:center;'>No crops added yet.</p>";
-}
-?>
-</div>
+<!-- DELETE -->
+<div class="card">
+<h2>Delete Crop</h2>
+<form method="post">
+<select name="del_farmer_id" required>
+<option value="">Select Farmer</option>
+<?php foreach($farmer_list as $f){
+echo "<option value='{$f['id']}'>{$f['name']}</option>";
+} ?>
+</select>
+
+<input type="text" name="del_crop_name" placeholder="Crop Name" required>
+<input type="password" name="password" placeholder="Farmer Login Password" required>
+<button class="delete" name="delete_crop">Delete Crop</button>
+</form>
 </div>
 
-</main>
+</div>
 </body>
 </html>
